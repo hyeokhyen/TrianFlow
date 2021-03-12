@@ -15,6 +15,8 @@ import warnings
 import copy
 from collections import OrderedDict
 warnings.filterwarnings("ignore")
+from pprint import pprint
+from tqdm import tqdm
 
 def save_traj(path, poses):
     """
@@ -26,7 +28,7 @@ def save_traj(path, poses):
         pose = poses[i].flatten()[:12] # [3x4]
         line = " ".join([str(j) for j in pose])
         f.write(line + '\n')
-    print('Trajectory Saved.')
+    # print('Trajectory Saved.')
 
 def projection(xy, points, h_max, w_max):
     # Project the triangulation points to depth map. Directly correspondence mapping rather than projection.
@@ -74,17 +76,15 @@ def cv_triangulation(matches, pose):
     return points1, points2
 
 class infer_vo():
-    def __init__(self, seq_id, sequences_root_dir):
-        self.img_dir = sequences_root_dir
-        #self.img_dir = '/home4/zhaow/data/kitti_odometry/sampled_s4_sequences/'
-        self.seq_id = seq_id
-        self.raw_img_h = 370.0#320
-        self.raw_img_w = 1226.0#1024
-        self.new_img_h = 256#320
-        self.new_img_w = 832#1024
+    def __init__(self, cfg):
+        self.device = cfg.device
+        self.dir_rel_frame = cfg.dir_rel_frame
+        os.makedirs(self.dir_rel_frame, exist_ok=True)
+
+        self.new_img_h = cfg.img_hw[0] # 256#320
+        self.new_img_w = cfg.img_hw[1] # 832#1024
         self.max_depth = 50.0
         self.min_depth = 0.0
-        self.cam_intrinsics = self.read_rescale_camera_intrinsics(os.path.join(self.img_dir, seq_id) + '/calib.txt')
         self.flow_pose_ransac_thre = 0.1 #0.2
         self.flow_pose_ransac_times = 10 #5
         self.flow_pose_min_flow = 5
@@ -96,81 +96,112 @@ class infer_vo():
         self.PnP_ransac_thre = 1
         self.PnP_ransac_times = 5
     
-    def read_rescale_camera_intrinsics(self, path):
+    def read_rescale_camera_intrinsics(self):
         raw_img_h = self.raw_img_h
         raw_img_w = self.raw_img_w
         new_img_h = self.new_img_h
         new_img_w = self.new_img_w
-        with open(path, 'r') as f:
-            lines = f.readlines()
-        data = lines[-1].strip('\n').split(' ')[1:]
-        data = [float(k) for k in data]
-        data = np.array(data).reshape(3,4)
-        cam_intrinsics = data[:3,:3]
+
+        focal_length = raw_img_w
+        center = (raw_img_w/2, raw_img_h/2)
+        cam_intrinsics = np.array(
+                                [[focal_length, 0, center[0]],
+                                [0, focal_length, center[1]],
+                                [0, 0, 1]], 
+                                dtype = "double")
+
         cam_intrinsics[0,:] = cam_intrinsics[0,:] * new_img_w / raw_img_w
         cam_intrinsics[1,:] = cam_intrinsics[1,:] * new_img_h / raw_img_h
         return cam_intrinsics
-    
-    def load_images(self):
-        path = self.img_dir
-        seq = self.seq_id
-        new_img_h = self.new_img_h
-        new_img_w = self.new_img_w
-        seq_dir = os.path.join(path, seq)
-        image_dir = os.path.join(seq_dir, 'image_2')
-        num = len(os.listdir(image_dir))
-        images = []
-        for i in range(num):
-            image = cv2.imread(os.path.join(image_dir, '%.6d'%i)+'.png')
-            image = cv2.resize(image, (new_img_w, new_img_h))
-            images.append(image)
-        return images
-    
+        
     def get_prediction(self, img1, img2, model, K, K_inv, match_num):
         # img1: [3,H,W] K: [3,3]
         #visualizer = Visualizer_debug('/home3/zhaow/TrianFlow-pytorch/vis/')
-        img1_t = torch.from_numpy(np.transpose(img1 / 255.0, [2,0,1])).cuda().float().unsqueeze(0)
-        img2_t = torch.from_numpy(np.transpose(img2 / 255.0, [2,0,1])).cuda().float().unsqueeze(0)
-        K = torch.from_numpy(K).cuda().float().unsqueeze(0)
-        K_inv = torch.from_numpy(K_inv).cuda().float().unsqueeze(0)
+        img1_t = torch.from_numpy(np.transpose(img1 / 255.0, [2,0,1])).to(self.device).float().unsqueeze(0)
+        img2_t = torch.from_numpy(np.transpose(img2 / 255.0, [2,0,1])).to(self.device).float().unsqueeze(0)
+        K = torch.from_numpy(K).to(self.device).float().unsqueeze(0)
+        K_inv = torch.from_numpy(K_inv).to(self.device).float().unsqueeze(0)
 
         filt_depth_match, depth1, depth2 = model.infer_vo(img1_t, img2_t, K, K_inv, match_num)
         return filt_depth_match[0].transpose(0,1).cpu().detach().numpy(), depth1[0].squeeze(0).cpu().detach().numpy(), depth2[0].squeeze(0).cpu().detach().numpy()
 
     
-    def process_video(self, images, model):
+    def process_video(self, list_img, model):
         '''Process a sequence to get scale consistent trajectory results. 
         Register according to depth net predictions. Here we assume depth predictions have consistent scale.
         If not, pleas use process_video_tri which only use triangulated depth to get self-consistent scaled pose.
         '''
+        
+        # load image names
+        new_img_h = self.new_img_h
+        new_img_w = self.new_img_w
+        
+        # get camera intrinsic matrix
+        file_img = list_img[0]
+        image_dir = os.path.dirname(file_img)
+        image = cv2.imread(file_img)
+        # print ('load from ...', file_img)
+        # assert False
+        raw_img_h, raw_img_w, _ = image.shape
+        self.raw_img_h = raw_img_h # 370.0#320
+        self.raw_img_w = raw_img_w # 1226.0#1024
+
+        self.cam_intrinsics = self.read_rescale_camera_intrinsics()
+
+        # inference
         poses = []
+        rel_poses = []
         global_pose = np.eye(4)
         # The first one global pose is origin.
         poses.append(copy.deepcopy(global_pose))
-        seq_len = len(images)
+        rel_poses.append(copy.deepcopy(global_pose))
+        seq_len = len(list_img)
         K = self.cam_intrinsics
         K_inv = np.linalg.inv(self.cam_intrinsics)
         for i in range(seq_len-1):
-            img1, img2 = images[i], images[i+1]
-            depth_match, depth1, depth2 = self.get_prediction(img1, img2, model, K, K_inv, match_num=5000)
-            
-            rel_pose = np.eye(4)
-            flow_pose = self.solve_pose_flow(depth_match[:,:2], depth_match[:,2:])
-            rel_pose[:3,:3] = copy.deepcopy(flow_pose[:3,:3])
-            if np.linalg.norm(flow_pose[:3,3:]) != 0:
-                scale = self.align_to_depth(depth_match[:,:2], depth_match[:,2:], flow_pose, depth2)
-                rel_pose[:3,3:] = flow_pose[:3,3:] * scale
-            
-            if np.linalg.norm(flow_pose[:3,3:]) == 0 or scale == -1:
-                print('PnP '+str(i))
-                pnp_pose = self.solve_pose_pnp(depth_match[:,:2], depth_match[:,2:], depth1)
-                rel_pose = pnp_pose
+            # img1, img2 = images[i], images[i+1]
+            file_img1, file_img2  = list_img[i], list_img[i+1]
+            dir_img1, name_img1 = os.path.split(file_img1) 
+            ts_img1 = name_img1[:-4]
+            file_rel_frame = self.dir_rel_frame + f'/{ts_img1}.npy'
+            if os.path.exists(file_rel_frame):
+                rel_pose = np.load(file_rel_frame)
+                print ('load from ...', file_rel_frame)
+            else:
+                try:
+                    img1 = cv2.imread(file_img1)
+                    print ('load from ...', file_img1)
+                    img1 = cv2.resize(img1, (new_img_w, new_img_h))
+
+                    img2 = cv2.imread(file_img2)
+                    print ('load from ...', file_img2)
+                    img2 = cv2.resize(img2, (new_img_w, new_img_h))
+
+                    depth_match, depth1, depth2 = self.get_prediction(img1, img2, model, K, K_inv, match_num=5000)
+                    
+                    rel_pose = np.eye(4)
+                    flow_pose = self.solve_pose_flow(depth_match[:,:2], depth_match[:,2:])
+                    rel_pose[:3,:3] = copy.deepcopy(flow_pose[:3,:3])
+                    if np.linalg.norm(flow_pose[:3,3:]) != 0:
+                        scale = self.align_to_depth(depth_match[:,:2], depth_match[:,2:], flow_pose, depth2)
+                        rel_pose[:3,3:] = flow_pose[:3,3:] * scale
+                    
+                    if np.linalg.norm(flow_pose[:3,3:]) == 0 or scale == -1:
+                        # print('PnP '+str(i))
+                        pnp_pose = self.solve_pose_pnp(depth_match[:,:2], depth_match[:,2:], depth1)
+                        rel_pose = pnp_pose
+                except:
+                    rel_pose = np.eye(4)
+                np.save(file_rel_frame, rel_pose)
+                print ('save in ...', file_rel_frame)
 
             global_pose[:3,3:] = np.matmul(global_pose[:3,:3], rel_pose[:3,3:]) + global_pose[:3,3:]
             global_pose[:3,:3] = np.matmul(global_pose[:3,:3], rel_pose[:3,:3])
             poses.append(copy.deepcopy(global_pose))
-            print(i)
-        return poses
+            rel_poses.append(copy.deepcopy(rel_pose))
+            print(f'{image_dir} {i}/{seq_len-1}')
+            
+        return poses, rel_poses
     
     def normalize_coord(self, xy, K):
         xy_norm = copy.deepcopy(xy)
@@ -286,36 +317,140 @@ class infer_vo():
         pose[:3,3:] = t
         return pose
 
+class AttrDict(dict):
+
+    IMMUTABLE = '__immutable__'
+
+    def __init__(self, *args, **kwargs):
+        super(AttrDict, self).__init__(*args, **kwargs)
+        self.__dict__[AttrDict.IMMUTABLE] = False
+
+    def __getattr__(self, name):
+        if name in self.__dict__:
+            return self.__dict__[name]
+        elif name in self:
+            return self[name]
+        else:
+            raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        if not self.__dict__[AttrDict.IMMUTABLE]:
+            if name in self.__dict__:
+                self.__dict__[name] = value
+            else:
+                self[name] = value
+        else:
+            raise AttributeError(
+                'Attempted to set "{}" to "{}", but AttrDict is immutable'.
+                format(name, value)
+            )
+
+    def immutable(self, is_immutable):
+        """Set immutability to is_immutable and recursively apply the setting
+        to all nested AttrDicts.
+        """
+        self.__dict__[AttrDict.IMMUTABLE] = is_immutable
+        # Recursively set immutable state
+        for v in self.__dict__.values():
+            if isinstance(v, AttrDict):
+                v.immutable(is_immutable)
+        for v in self.values():
+            if isinstance(v, AttrDict):
+                v.immutable(is_immutable)
+
+    def is_immutable(self):
+        return self.__dict__[AttrDict.IMMUTABLE]
 
 if __name__ == '__main__':
-    import argparse
-    arg_parser = argparse.ArgumentParser(
-        description="TrianFlow training pipeline."
-    )
-    arg_parser.add_argument('-c', '--config_file', default=None, help='config file.')
-    arg_parser.add_argument('-g', '--gpu', type=str, default=0, help='gpu id.')
-    arg_parser.add_argument('--mode', type=str, default='flow', help='training mode.')
-    arg_parser.add_argument('--traj_save_dir_txt', type=str, default=None, help='directory for saving results')
-    arg_parser.add_argument('--sequences_root_dir', type=str, default=None, help='directory for test sequences')
-    arg_parser.add_argument('--sequence', type=str, default='09', help='Test sequence id.')
-    arg_parser.add_argument('--pretrained_model', type=str, default=None, help='directory for loading pretrained models')
-    args = arg_parser.parse_args()
+    
+    '''
+    python infer_vo.py 
+        --config_file ./config/odo.yaml 
+        --gpu [gpu_id] 
+        --traj_save_dir_txt [where/to/save/the/prediction/file] 
+        --sequences_root_dir [the/root/dir/of/your/image/sequences] 
+        --sequence [the sequence id] 
+        ----pretrained_model [path/to/your/model]
+    python ./core/evaluation/eval_odom.py 
+        --gt_txt [path/to/your/groundtruth/poses/txt] 
+        --result_txt [path/to/your/prediction/txt] 
+        --seq [sequence id to evaluate]
+    '''
+
+    # import argparse
+    # arg_parser = argparse.ArgumentParser(
+    #     description="TrianFlow training pipeline."
+    # )
+    # arg_parser.add_argument('-c', '--config_file', default=None, help='config file.')
+    # arg_parser.add_argument('-g', '--gpu', type=str, default=0, help='gpu id.')
+    # arg_parser.add_argument('--mode', type=str, default='flow', help='training mode.')
+    # arg_parser.add_argument('--traj_save_dir_txt', type=str, default=None, help='directory for saving results')
+    # arg_parser.add_argument('--sequences_root_dir', type=str, default=None, help='directory for test sequences')
+    # arg_parser.add_argument('--sequence', type=str, default='09', help='Test sequence id.')
+    # arg_parser.add_argument('--pretrained_model', type=str, default=None, help='directory for loading pretrained models')
+    # args = arg_parser.parse_args()
+    # pprint (args)
+    # assert False
+
+    '''
+    Namespace(
+        config_file=None, 
+        gpu=0, 
+        mode='flow', 
+        pretrained_model=None, 
+        sequence='09', 
+        sequences_root_dir=None, 
+        traj_save_dir_txt=None)
+    '''
+
+    input_name = 'rgbd_dataset_freiburg2_desk'
+    # input_name = 'rgbd_dataset_freiburg3_large_cabinet_validation'
+    # input_name = 'rgbd_dataset_freiburg3_structure_texture_far_validation'
+    # input_name = 'rgbd_dataset_freiburg3_structure_notexture_far_validation'
+
+    dataset_type = 'TUM' # TUM, KITTIs
+    os.makedirs(f'./demo_{dataset_type}', exist_ok=True)
+
+    class init_arg():
+        def __init__(self):
+            self.gpu = 0
+            self.mode = 'flow'
+            self.traj_save_dir_txt = f'./demo_{dataset_type}/{input_name}.txt'
+            self.sequences_root_dir = f'/nethome/hkwon64/Datasets/public/TUM/{input_name}/rgb'
+            if dataset_type == 'TUM':
+                self.config_file = './config/nyu.yaml'
+                self.pretrained_model = '/coc/pcba1/hkwon64/imuTube/repos_v2/odometry/TrianFlow/weights/tum.pth'
+            else:
+                self.config_file = './config/odo.yaml'
+                self.pretrained_model = '/coc/pcba1/hkwon64/imuTube/repos_v2/odometry/TrianFlow/weights/kitti_odo.pth'
+    args = init_arg()
+
+    device = torch.device('cuda', args.gpu)
+    args.device = device
 
     with open(args.config_file, 'r') as f:
         cfg = yaml.safe_load(f)
-    cfg['dataset'] = 'kitti_odo'
+    if dataset_type == 'TUM':
+        cfg['dataset'] = 'nuyv2'
+    else:
+        cfg['dataset'] = 'kitti_odo'
     # copy attr into cfg
     for attr in dir(args):
         if attr[:2] != '__':
             cfg[attr] = getattr(args, attr)
+    pprint (cfg)
+    # assert False
+
     class pObject(object):
         def __init__(self):
             pass
     cfg_new = pObject()
     for attr in list(cfg.keys()):
-        setattr(cfg_new, attr, cfg[attr])
+        setattr(cfg_new, attr, cfg[attr])    
     
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
+
+    print('Testing VO.')
 
     model = Model_depth_pose(cfg_new)
     model.cuda()
@@ -325,12 +460,19 @@ if __name__ == '__main__':
     model.eval()
     print('Model Loaded.')
 
-    print('Testing VO.')
-    vo_test = infer_vo(args.sequence, args.sequences_root_dir)
-    images = vo_test.load_images()
-    print('Images Loaded. Total ' + str(len(images)) + ' images found.')
-    poses = vo_test.process_video(images, model)
+    vo_test = infer_vo(cfg_new)
+
+    # images = vo_test.load_images(args.sequences_root_dir)
+    # print('Images Loaded. Total ' + str(len(images)) + ' images found.')
+
+    poses, rel_pose = vo_test.process_video(args.sequences_root_dir, model)
+    # poses, rel_pose = vo_test.process_video(images, model)
     print('Test completed.')
+    # assert False
 
     traj_txt = args.traj_save_dir_txt
     save_traj(traj_txt, poses)
+    print ('save in ...', traj_txt)
+
+    save_traj(traj_txt + '_rel.txt', rel_pose)
+    print ('save in ...', traj_txt + '_rel.txt')
