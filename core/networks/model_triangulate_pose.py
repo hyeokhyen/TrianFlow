@@ -11,7 +11,7 @@ import cv2
 class Model_triangulate_pose(nn.Module):
     def __init__(self, cfg):
         super(Model_triangulate_pose, self).__init__()
-        self.model_flow = Model_flow(cfg)
+        self.model_flow = Model_flow(cfg).to(cfg.device)
         self.mode = cfg.mode
         if cfg.dataset == 'nyuv2':
             self.inlier_thres = 0.1
@@ -19,7 +19,7 @@ class Model_triangulate_pose(nn.Module):
         else:
             self.inlier_thres = 0.1
             self.rigid_thres = 0.5
-        self.filter = reduced_ransac(check_num=cfg.ransac_points, thres=self.inlier_thres, dataset=cfg.dataset)
+        self.filter = reduced_ransac(check_num=cfg.ransac_points, thres=self.inlier_thres, dataset=cfg.dataset).to(cfg.device)
     
     def meshgrid(self, h, w):
         xx, yy = np.meshgrid(np.arange(0,w), np.arange(0,h))

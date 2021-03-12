@@ -151,8 +151,9 @@ def transformerFwd(U,
 class Model_flow(nn.Module):
     def __init__(self, cfg):
         super(Model_flow, self).__init__()
-        self.fpyramid = FeaturePyramid()
-        self.pwc_model = PWC_tf()
+        self.cfg = cfg
+        self.fpyramid = FeaturePyramid().to(cfg.device)
+        self.pwc_model = PWC_tf().to(cfg.device)
         if cfg.mode == 'depth' or cfg.mode == 'flowposenet':
             # Stage 2 training
             for param in self.fpyramid.parameters():
@@ -298,6 +299,9 @@ class Model_flow(nn.Module):
     
     def inference_corres(self, img1, img2):
         batch_size, img_h, img_w = img1.shape[0], img1.shape[2], img1.shape[3]
+
+        img1 = img1.to(self.cfg.device)
+        img2 = img2.to(self.cfg.device)
         
         # get the optical flows and reverse optical flows for each pair of adjacent images
         feature_list_1, feature_list_2 = self.fpyramid(img1), self.fpyramid(img2)
