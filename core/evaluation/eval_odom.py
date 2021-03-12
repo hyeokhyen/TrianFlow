@@ -4,7 +4,7 @@ import numpy as np
 import os
 from glob import glob
 import pdb
-
+from pprint import pprint
 
 def scale_lse_solver(X, Y):
     """Least-sqaure-error solver
@@ -143,12 +143,17 @@ class KittiEvalOdom():
     def calc_sequence_errors(self, poses_gt, poses_result):
         err = []
         dist = self.trajectory_distances(poses_gt)
+        # print (dist)
+        # assert False
+
         self.step_size = 10
 
         for first_frame in range(0, len(poses_gt), self.step_size):
             for i in range(self.num_lengths):
                 len_ = self.lengths[i]
                 last_frame = self.last_frame_from_segment_length(dist, first_frame, len_)
+                print (last_frame)
+                assert False
 
                 # ----------------------------------------------------------------------
 				# Continue if sequence not long enough
@@ -195,8 +200,10 @@ class KittiEvalOdom():
         ave_r_err = r_err / seq_len
         return ave_t_err, ave_r_err
 
-    def plotPath(self, seq, poses_gt, poses_result):
-        plot_keys = ["Ground Truth", "Ours"]
+    def plotPath(self, input_name, poses_gt, poses_result):
+        # plot_keys = ["Ground Truth", "Ours"]
+        plot_keys = ["Ours"]
+
         fontsize_ = 20
         plot_num =-1
 
@@ -213,7 +220,10 @@ class KittiEvalOdom():
             # for pose in poses_dict[key]:
             for frame_idx in sorted(poses_dict[key].keys()):
                 pose = poses_dict[key][frame_idx]
-                pos_xz.append([pose[0,3],  pose[2,3]])
+                if key == 'Ground Truth':
+                    pos_xz.append([pose[0,3],  pose[2,3]])
+                else:
+                    pos_xz.append([pose[1,3],  pose[2,3]])
             pos_xz = np.asarray(pos_xz)
             plt.plot(pos_xz[:,0],  pos_xz[:,1], label = key)
 
@@ -223,8 +233,10 @@ class KittiEvalOdom():
         plt.xlabel('x (m)', fontsize=fontsize_)
         plt.ylabel('z (m)', fontsize=fontsize_)
         fig.set_size_inches(10, 10)
-        png_title = "sequence_"+(seq)
-        plt.savefig(self.plot_path_dir + "/" + png_title + ".pdf", bbox_inches='tight', pad_inches=0)
+        png_title = "sequence_"+(input_name)
+        file_pdf = self.plot_path_dir + "/" + png_title + ".pdf"
+        plt.savefig(file_pdf, bbox_inches='tight', pad_inches=0)
+        print ('save in ...', file_pdf)
         # plt.show()
 
     def compute_segment_error(self, seq_errs):
@@ -279,12 +291,13 @@ class KittiEvalOdom():
             pred_updated[i][:3, 3] *= scale
         return pred_updated
 
-    def eval(self, gt_txt, result_txt, seq=None):
+    def eval(self, gt_txt, result_txt, input_name):
         # gt_dir: the directory of groundtruth poses txt
         # results_dir: the directory of predicted poses txt
         self.plot_path_dir = os.path.dirname(result_txt) + "/plot_path"
         if not os.path.exists(self.plot_path_dir):
             os.makedirs(self.plot_path_dir)
+        print (self.plot_path_dir)
         
         self.gt_txt = gt_txt
 
@@ -292,7 +305,18 @@ class KittiEvalOdom():
         ave_r_errs = []
 
         poses_result = self.loadPoses(result_txt)
+        print ('load from ...', result_txt)
+
         poses_gt = self.loadPoses(self.gt_txt)
+        print ('load from ...', self.gt_txt)
+
+        # pprint (poses_result)
+        # pprint (poses_gt)
+        # assert False
+
+        self.plotPath(input_name, poses_gt, poses_result)    
+        print ('save in ...', input_name)
+        return 0
 
         # Pose alignment to first frame
         idx_0 = sorted(list(poses_result.keys()))[0]
@@ -321,10 +345,23 @@ class KittiEvalOdom():
             poses_result[cnt][:3, 3] *= scale
             poses_result[cnt] = align_transformation @ poses_result[cnt]
 
+
+        # Plotting
+        self.plotPath(input_name, poses_gt, poses_result)    
+        print ('save in ...', input_name)
+        return 0
+
+
         # ----------------------------------------------------------------------
         # compute sequence errors
         # ----------------------------------------------------------------------
+        # pprint (poses_gt)
+        # pprint (poses_result)
+        # assert False
+
         seq_err = self.calc_sequence_errors(poses_gt, poses_result)
+        pprint (seq_err)
+        assert False
 
         # ----------------------------------------------------------------------
         # Compute segment errors
@@ -335,14 +372,10 @@ class KittiEvalOdom():
         # compute overall error
         # ----------------------------------------------------------------------
         ave_t_err, ave_r_err = self.compute_overall_err(seq_err)
-        print("Sequence: " + seq)
         print("Translational error (%): ", ave_t_err*100)
         print("Rotational error (deg/100m): ", ave_r_err/np.pi*180*100)
         ave_t_errs.append(ave_t_err)
         ave_r_errs.append(ave_r_err)
-
-        # Plotting
-        self.plotPath(seq, poses_gt, poses_result)    
 
         print("-------------------- For Copying ------------------------------")
         for i in range(len(ave_t_errs)):
@@ -352,12 +385,21 @@ class KittiEvalOdom():
 
 
 if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser(description='KITTI evaluation')
-    parser.add_argument('--gt_txt', type=str, required=True, help="Groundtruth directory")
-    parser.add_argument('--result_txt', type=str, required=True, help="Result directory")
-    parser.add_argument('--seq', type=str, help="sequences to be evaluated", default='09')
-    args = parser.parse_args()
+    # import argparse
+    # parser = argparse.ArgumentParser(description='KITTI evaluation')
+    # parser.add_argument('--gt_txt', type=str, required=True, help="Groundtruth directory")
+    # parser.add_argument('--result_txt', type=str, required=True, help="Result directory")
+    # args = parser.parse_args()
+
+    # input_name = 'rgbd_dataset_freiburg2_desk_secret'
+    # input_name = 'rgbd_dataset_freiburg3_large_cabinet_validation'
+
+    dataset_type = 'TUM' #'TUM'
+    
+    input_name = 'rgbd_dataset_freiburg3_structure_texture_far_validation'
+
+    gt_txt = f'/coc/pcba1/hkwon64/imuTube/repos_v2/odometry/TrianFlow/demo_{dataset_type}/{input_name}_gt_associate.txt'
+    result_txt = f'/coc/pcba1/hkwon64/imuTube/repos_v2/odometry/TrianFlow/demo_{dataset_type}/{input_name}_associate.txt'
 
     eval_tool = KittiEvalOdom()
-    eval_tool.eval(args.gt_txt, args.result_txt, seq=args.seq)
+    eval_tool.eval(gt_txt, result_txt, input_name)
